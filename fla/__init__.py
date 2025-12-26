@@ -1,4 +1,12 @@
 
+import os
+
+import torch
+
+if getattr(torch.version, "hip", None):
+    # Prefer flash-attn's AMD Triton backend on ROCm when not explicitly configured.
+    os.environ.setdefault("FLASH_ATTENTION_TRITON_AMD_ENABLE", "TRUE")
+
 from fla.layers import (
     ABCAttention,
     Attention,

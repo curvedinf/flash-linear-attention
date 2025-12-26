@@ -20,6 +20,7 @@ from fla.modules.layernorm import RMSNorm
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, require_version
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
+TL_ROUND = tl.extra.hip.libdevice.round if IS_AMD else tl.extra.cuda.libdevice.round
 
 
 def activation_quant(x):
@@ -128,7 +129,7 @@ def layer_norm_fwd_kernel_quant(
     # Aply quantization to the output
     scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
     # Quantize and then de-quantize the tensor
-    y = tl.extra.cuda.libdevice.round(y * scale)
+    y = TL_ROUND(y * scale)
     y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
     # Write output
@@ -271,7 +272,7 @@ def layer_norm_bwd_kernel(
             # Aply quantization to the output
             scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
             # Quantize and then de-quantize the tensor
-            y = tl.extra.cuda.libdevice.round(y * scale)
+            y = TL_ROUND(y * scale)
             y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
             tl.store(Y + cols, y, mask=mask)
