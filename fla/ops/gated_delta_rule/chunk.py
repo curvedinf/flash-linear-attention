@@ -162,7 +162,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        use_qk_l2norm_in_kernel: bool = False,
+        use_qk_l2norm_in_kernel: bool = True,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -223,7 +223,7 @@ def chunk_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
+    use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     **kwargs,
 ):
@@ -249,7 +249,7 @@ def chunk_gated_delta_rule(
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
-            Whether to apply L2norm to the q/k tensor internally. Default: `False`.
+            Whether to apply L2norm to the q/k tensor internally. Default: `True`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.

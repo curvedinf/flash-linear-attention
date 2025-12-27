@@ -146,7 +146,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
+    use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -205,7 +205,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float = None,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
-        use_qk_l2norm_in_kernel: bool = False,
+        use_qk_l2norm_in_kernel: bool = True,
         cu_seqlens: torch.LongTensor | None = None,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -246,7 +246,7 @@ def fused_recurrent_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
+    use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -276,7 +276,7 @@ def fused_recurrent_gated_delta_rule(
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (Optional[bool]):
-            Whether to use L2 normalization in the kernel. Default: `False`.
+            Whether to use L2 normalization in the kernel. Default: `True`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
