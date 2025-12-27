@@ -37,6 +37,7 @@ else:
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
+    'USE_K_RSTD': lambda args: args['k_rstd'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -45,7 +46,7 @@ else:
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN', 'USE_K_RSTD'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -57,6 +58,7 @@ def recompute_w_u_fwd_kernel(
     u,
     A,
     g,
+    k_rstd,
     cu_seqlens,
     chunk_indices,
     T,
@@ -67,6 +69,7 @@ def recompute_w_u_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_K_RSTD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -82,6 +85,10 @@ def recompute_w_u_fwd_kernel(
 
     p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_A = tl.load(p_A, boundary_check=(0, 1))
+
+    if USE_K_RSTD:
+        p_krstd = tl.make_block_ptr(k_rstd + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        b_krstd = tl.load(p_krstd, boundary_check=(0,))
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -99,6 +106,8 @@ def recompute_w_u_fwd_kernel(
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        if USE_K_RSTD:
+            b_k = b_k * b_krstd[:, None]
         b_kb = b_k * b_b[:, None]
         if USE_G:
             b_kb *= b_g[:, None]
@@ -108,6 +117,7 @@ def recompute_w_u_fwd_kernel(
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
+    'USE_K_RSTD': lambda args: args['k_rstd'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -116,7 +126,7 @@ def recompute_w_u_fwd_kernel(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN', 'USE_K_RSTD'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -132,6 +142,7 @@ def prepare_wy_repr_bwd_kernel(
     dv,
     db,
     dg,
+    k_rstd,
     cu_seqlens,
     chunk_indices,
     T,
@@ -142,6 +153,7 @@ def prepare_wy_repr_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_K_RSTD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -162,6 +174,10 @@ def prepare_wy_repr_bwd_kernel(
     b_A = tl.load(p_A, boundary_check=(0, 1))
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
 
+    if USE_K_RSTD:
+        p_krstd = tl.make_block_ptr(k_rstd + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        b_krstd = tl.load(p_krstd, boundary_check=(0,))
+
     if USE_G:
         p_g = tl.make_block_ptr(g + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
@@ -174,6 +190,8 @@ def prepare_wy_repr_bwd_kernel(
         p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         # [BT, BK]
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        if USE_K_RSTD:
+            b_k = b_k * b_krstd[:, None]
         if USE_G:
             b_kbg = b_k * (b_b * b_g_exp)[:, None]
         else:
@@ -219,6 +237,8 @@ def prepare_wy_repr_bwd_kernel(
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        if USE_K_RSTD:
+            b_k = b_k * b_krstd[:, None]
         b_kt = tl.trans(b_k)
         b_ktb = b_kt * b_b[None, :]
 
@@ -245,6 +265,7 @@ def recompute_w_u_fwd(
     beta: torch.Tensor,
     A: torch.Tensor,
     g: torch.Tensor | None = None,
+    k_rstd: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -265,6 +286,7 @@ def recompute_w_u_fwd(
         u=u,
         A=A,
         g=g,
+        k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
@@ -286,6 +308,7 @@ def prepare_wy_repr_bwd(
     dw: torch.Tensor,
     du: torch.Tensor,
     g: torch.Tensor = None,
+    k_rstd: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -312,6 +335,7 @@ def prepare_wy_repr_bwd(
         dv=dv,
         db=db,
         dg=dg,
+        k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,

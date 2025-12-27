@@ -18,6 +18,7 @@ FWD_STAGES = [1] if IS_AMD else [2, 3, 4]
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'SAVE_NEW_VALUE': lambda args: args['v_new'] is not None,
+    'USE_K_RSTD': lambda args: args['k_rstd'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -27,7 +28,7 @@ FWD_STAGES = [1] if IS_AMD else [2, 3, 4]
         for num_stages in FWD_STAGES
         for BV in [32, 64]
     ],
-    key=['H', 'K', 'V', 'BT', 'USE_EXP2'],
+    key=['H', 'K', 'V', 'BT', 'USE_EXP2', 'USE_K_RSTD'],
     use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
@@ -42,6 +43,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     h,
     h0,
     ht,
+    k_rstd,
     cu_seqlens,
     chunk_offsets,
     T,
@@ -55,6 +57,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
+    USE_K_RSTD: tl.constexpr,
     USE_EXP2: tl.constexpr,
     USE_FP32_DOT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -213,36 +216,56 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         if not USE_FP32_DOT:
             b_v = b_v.to(k.dtype.element_ty)
 
+        if USE_K_RSTD:
+            p_krstd = tl.make_block_ptr(k_rstd + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+            b_krstd = tl.load(p_krstd, boundary_check=(0,))
+
         p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (64, BT), (0, 1))
         if USE_FP32_DOT:
             b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+            if USE_K_RSTD:
+                b_k = b_k * b_krstd[None, :]
             b_h1 += tl.dot(b_k, b_v)
         else:
             b_k = tl.load(p_k, boundary_check=(0, 1))
+            if USE_K_RSTD:
+                b_k = b_k * b_krstd[None, :]
             b_h1 += tl.dot(b_k, b_v)
         if K > 64:
             p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (64, i_t * BT), (64, BT), (0, 1))
             if USE_FP32_DOT:
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                if USE_K_RSTD:
+                    b_k = b_k * b_krstd[None, :]
                 b_h2 += tl.dot(b_k, b_v)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+                if USE_K_RSTD:
+                    b_k = b_k * b_krstd[None, :]
                 b_h2 += tl.dot(b_k, b_v)
         if K > 128:
             p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (128, i_t * BT), (64, BT), (0, 1))
             if USE_FP32_DOT:
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                if USE_K_RSTD:
+                    b_k = b_k * b_krstd[None, :]
                 b_h3 += tl.dot(b_k, b_v)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+                if USE_K_RSTD:
+                    b_k = b_k * b_krstd[None, :]
                 b_h3 += tl.dot(b_k, b_v)
         if K > 192:
             p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (192, i_t * BT), (64, BT), (0, 1))
             if USE_FP32_DOT:
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                if USE_K_RSTD:
+                    b_k = b_k * b_krstd[None, :]
                 b_h4 += tl.dot(b_k, b_v)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+                if USE_K_RSTD:
+                    b_k = b_k * b_krstd[None, :]
                 b_h4 += tl.dot(b_k, b_v)
 
     if STORE_FINAL_STATE:
@@ -264,6 +287,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     'USE_GK': lambda args: args['gk'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
+    'USE_Q_RSTD': lambda args: args['q_rstd'] is not None,
+    'USE_K_RSTD': lambda args: args['k_rstd'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -273,7 +298,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
         for BV in [64, 32]
     ],
-    key=['H', 'K', 'V', 'BT', 'BV', 'USE_G', 'USE_EXP2'],
+    key=['H', 'K', 'V', 'BT', 'BV', 'USE_G', 'USE_EXP2', 'USE_Q_RSTD', 'USE_K_RSTD'],
     use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
@@ -290,6 +315,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     dh,
     dv,
     dv2,
+    q_rstd,
+    k_rstd,
     cu_seqlens,
     chunk_offsets,
     scale,
@@ -303,6 +330,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
+    USE_Q_RSTD: tl.constexpr,
+    USE_K_RSTD: tl.constexpr,
     USE_EXP2: tl.constexpr,
     USE_FP32_DOT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -388,12 +417,21 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
 
         b_do = tl.load(p_do, boundary_check=(0, 1))
 
+        if USE_Q_RSTD:
+            p_qrstd = tl.make_block_ptr(q_rstd + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+            b_qrstd = tl.load(p_qrstd, boundary_check=(0,))
+        if USE_K_RSTD:
+            p_krstd = tl.make_block_ptr(k_rstd + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+            b_krstd = tl.load(p_krstd, boundary_check=(0,))
+
         # Update dv
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, 64), (1, 0))
         if USE_FP32_DOT:
             b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
         else:
             b_k = tl.load(p_k, boundary_check=(0, 1))
+        if USE_K_RSTD:
+            b_k = b_k * b_krstd[:, None]
         if USE_GK:
             o_k1 = tl.arange(0, 64)
             b_gk_last1 = tl.load(gk + last_idx * H*K + o_k1, mask=(o_k1 < K), other=0.)
@@ -408,6 +446,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+            if USE_K_RSTD:
+                b_k = b_k * b_krstd[:, None]
             if USE_GK:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(gk + last_idx * H*K + o_k2, mask=(o_k2 < K), other=0.)
@@ -422,6 +462,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+            if USE_K_RSTD:
+                b_k = b_k * b_krstd[:, None]
             if USE_GK:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(gk + last_idx * H*K + o_k3, mask=(o_k3 < K), other=0.)
@@ -436,6 +478,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
+            if USE_K_RSTD:
+                b_k = b_k * b_krstd[:, None]
             if USE_GK:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(gk + last_idx * H*K + o_k4, mask=(o_k4 < K), other=0.)
@@ -466,6 +510,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         else:
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
+        if USE_Q_RSTD:
+            b_q = b_q * b_qrstd[None, :]
         if USE_G:
             b_dh1 *= bg_last_exp
             b_q = b_q * b_g_exp[None, :]
@@ -487,6 +533,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
+            if USE_Q_RSTD:
+                b_q = b_q * b_qrstd[None, :]
             if USE_G:
                 b_dh2 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
@@ -508,6 +556,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
+            if USE_Q_RSTD:
+                b_q = b_q * b_qrstd[None, :]
             if USE_G:
                 b_dh3 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
@@ -529,6 +579,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
+            if USE_Q_RSTD:
+                b_q = b_q * b_qrstd[None, :]
             if USE_G:
                 b_dh4 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
@@ -562,6 +614,7 @@ def chunk_gated_delta_rule_fwd_h(
     u: torch.Tensor,
     g: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
+    k_rstd: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
@@ -597,6 +650,7 @@ def chunk_gated_delta_rule_fwd_h(
         h=h,
         h0=initial_state,
         ht=final_state,
+        k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
@@ -618,6 +672,8 @@ def chunk_gated_delta_rule_bwd_dhu(
     dv: torch.Tensor,
     g: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
+    q_rstd: torch.Tensor | None = None,
+    k_rstd: torch.Tensor | None = None,
     h0: torch.Tensor | None = None,
     dht: torch.Tensor | None = None,
     scale: float | None = None,
@@ -655,6 +711,8 @@ def chunk_gated_delta_rule_bwd_dhu(
         dh=dh,
         dv=dv,
         dv2=dv2,
+        q_rstd=q_rstd,
+        k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         scale=scale,

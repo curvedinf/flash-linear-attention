@@ -143,6 +143,77 @@ def l2norm_bwd_kernel(
     tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BT': BT}, num_warps=num_warps)
+        for num_warps in [1, 2, 4, 8, 16]
+        for BT in BT_LIST
+    ],
+    key=['D', 'NB'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def l2norm_bwd_from_x_kernel(
+    x,
+    rstd,
+    dy,
+    dx,
+    eps,
+    T,
+    D: tl.constexpr,
+    BD: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+):
+    i_t = tl.program_id(0)
+    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
+    p_dy = tl.make_block_ptr(dy, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_dx = tl.make_block_ptr(dx, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+
+    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    b_rstd = tl.load(p_rstd, boundary_check=(0,)).to(tl.float32)
+    b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+    b_dot = tl.sum(b_dy * b_x, 1)
+    b_rstd3 = b_rstd * b_rstd * b_rstd
+    b_dx = b_dy * b_rstd[:, None] - b_x * (b_dot * b_rstd3)[:, None]
+    tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit
+def l2norm_bwd_from_x_kernel1(
+    x,
+    rstd,
+    dy,
+    dx,
+    eps,
+    D,
+    BD: tl.constexpr,
+):
+    i_t = tl.program_id(0)
+    x += i_t * D
+    dx += i_t * D
+    dy += i_t * D
+
+    cols = tl.arange(0, BD)
+    mask = cols < D
+    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    b_rstd = tl.load(rstd + i_t).to(tl.float32)
+    b_dy = tl.load(dy + cols, mask=mask, other=0.0).to(tl.float32)
+    b_dot = tl.sum(b_dy * b_x, axis=0)
+    b_rstd3 = b_rstd * b_rstd * b_rstd
+    b_dx = b_dy * b_rstd - b_x * (b_dot * b_rstd3)
+    tl.store(dx + cols, b_dx, mask=mask)
+
+
 def l2norm_fwd(
     x: torch.Tensor,
     eps: float = 1e-6,
@@ -234,6 +305,50 @@ def l2norm_bwd(
         )
 
     return dx.view(y_shape_og)
+
+
+def l2norm_bwd_from_x(
+    x: torch.Tensor,
+    rstd: torch.Tensor,
+    dy: torch.Tensor,
+    eps: float = 1e-6,
+):
+    x_shape_og = x.shape
+    x = x.view(-1, x.shape[-1])
+    dy = dy.view(-1, dy.shape[-1])
+    assert dy.shape == x.shape
+    dx = torch.empty_like(x)
+    T, D = x.shape[0], x.shape[-1]
+    MAX_FUSED_SIZE = 65536 // x.element_size()
+    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    if D > BD:
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+
+    if D <= 512:
+        NB = triton.cdiv(T, 2048)
+        def grid(meta): return (triton.cdiv(T, meta['BT']), )
+        l2norm_bwd_from_x_kernel[grid](
+            x=x,
+            rstd=rstd,
+            dy=dy,
+            dx=dx,
+            eps=eps,
+            T=T,
+            D=D,
+            BD=BD,
+            NB=NB,
+        )
+    else:
+        l2norm_bwd_from_x_kernel1[(T,)](
+            x=x,
+            rstd=rstd,
+            dy=dy,
+            dx=dx,
+            eps=eps,
+            D=D,
+            BD=BD,
+        )
+    return dx.view(x_shape_og)
 
 
 class L2NormFunction(torch.autograd.Function):

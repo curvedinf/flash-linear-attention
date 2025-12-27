@@ -12,6 +12,7 @@ from fla.utils import autotune_cache_kwargs
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
+    'USE_K_RSTD': lambda args: args['k_rstd'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -21,7 +22,7 @@ from fla.utils import autotune_cache_kwargs
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'BT', 'IS_VARLEN'],
+    key=['H', 'K', 'BT', 'IS_VARLEN', 'USE_K_RSTD'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -30,8 +31,10 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     g,
     beta,
     A,
+    k_rstd,
     cu_seqlens,
     chunk_indices,
+    eps,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -39,6 +42,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_K_RSTD: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -55,10 +59,21 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     b_b = tl.load(p_b, boundary_check=(0,))
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
+    if USE_K_RSTD:
+        b_k_sumsq = tl.zeros([BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_A += tl.dot(b_k, tl.trans(b_k))
+        if USE_K_RSTD:
+            b_k_f = b_k.to(tl.float32)
+            b_k_sumsq += tl.sum(b_k_f * b_k_f, axis=1)
+
+    if USE_K_RSTD:
+        p_krstd = tl.make_block_ptr(k_rstd + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        b_krstd = tl.where(m_t, 1.0 / tl.sqrt(b_k_sumsq + eps), 0.0)
+        tl.store(p_krstd, b_krstd.to(p_krstd.dtype.element_ty), boundary_check=(0,))
+        b_A *= b_krstd[:, None] * b_krstd[None, :]
 
     if USE_G:
         p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
@@ -77,9 +92,11 @@ def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
     g: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
+    k_rstd: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    l2_norm_eps: float = 1e-6,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -114,8 +131,10 @@ def chunk_scaled_dot_kkt_fwd(
         g=g,
         beta=beta,
         A=A,
+        k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        eps=l2_norm_eps,
         T=T,
         H=H,
         K=K,
