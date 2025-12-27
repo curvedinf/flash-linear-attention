@@ -276,10 +276,12 @@ def chunk_bwd_kernel_dqkwg(
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
+    q_dtype = b_q.dtype
+    k_dtype = b_k.dtype
     if USE_Q_RSTD:
-        b_q = b_q * b_qrstd[:, None]
+        b_q = (b_q.to(tl.float32) * b_qrstd[:, None]).to(q_dtype)
     if USE_K_RSTD:
-        b_k = b_k * b_krstd[:, None]
+        b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
 
     p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -419,10 +421,12 @@ def chunk_bwd_kernel_dv(
         p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        q_dtype = b_q.dtype
+        k_dtype = b_k.dtype
         if USE_Q_RSTD:
-            b_q = b_q * b_qrstd[None, :]
+            b_q = (b_q.to(tl.float32) * b_qrstd[None, :]).to(q_dtype)
         if USE_K_RSTD:
-            b_k = b_k * b_krstd[:, None]
+            b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
         b_A += tl.dot(b_k, b_q)
         p_dh = tl.make_block_ptr(dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
@@ -539,10 +543,12 @@ def chunk_bwd_kernel_dv_local(
 
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
+            q_dtype = b_q.dtype
+            k_dtype = b_k.dtype
             if USE_Q_RSTD:
-                b_q = b_q * b_qrstd[None, :]
+                b_q = (b_q.to(tl.float32) * b_qrstd[None, :]).to(q_dtype)
             if USE_K_RSTD:
-                b_k = b_k * b_krstd[:, None]
+                b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
             b_A += tl.dot(b_k, b_q) * scale
         if USE_G or USE_G_GAMMA:
             b_A *= exp(b_g[None, :] - b_g[:, None])

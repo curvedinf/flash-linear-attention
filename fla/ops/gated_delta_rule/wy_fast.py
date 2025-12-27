@@ -106,8 +106,9 @@ def recompute_w_u_fwd_kernel(
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        k_dtype = b_k.dtype
         if USE_K_RSTD:
-            b_k = b_k * b_krstd[:, None]
+            b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
         b_kb = b_k * b_b[:, None]
         if USE_G:
             b_kb *= b_g[:, None]
@@ -190,8 +191,9 @@ def prepare_wy_repr_bwd_kernel(
         p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         # [BT, BK]
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        k_dtype = b_k.dtype
         if USE_K_RSTD:
-            b_k = b_k * b_krstd[:, None]
+            b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
         if USE_G:
             b_kbg = b_k * (b_b * b_g_exp)[:, None]
         else:
@@ -237,8 +239,9 @@ def prepare_wy_repr_bwd_kernel(
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
+        k_dtype = b_k.dtype
         if USE_K_RSTD:
-            b_k = b_k * b_krstd[:, None]
+            b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
         b_kt = tl.trans(b_k)
         b_ktb = b_kt * b_b[None, :]
 

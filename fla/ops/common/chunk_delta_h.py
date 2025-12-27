@@ -224,48 +224,56 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         if USE_FP32_DOT:
             b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
             if USE_K_RSTD:
-                b_k = b_k * b_krstd[None, :]
+                k_dtype = b_k.dtype
+                b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
             b_h1 += tl.dot(b_k, b_v)
         else:
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_K_RSTD:
-                b_k = b_k * b_krstd[None, :]
+                k_dtype = b_k.dtype
+                b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
             b_h1 += tl.dot(b_k, b_v)
         if K > 64:
             p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (64, i_t * BT), (64, BT), (0, 1))
             if USE_FP32_DOT:
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
                 if USE_K_RSTD:
-                    b_k = b_k * b_krstd[None, :]
+                    k_dtype = b_k.dtype
+                    b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
                 b_h2 += tl.dot(b_k, b_v)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_K_RSTD:
-                    b_k = b_k * b_krstd[None, :]
+                    k_dtype = b_k.dtype
+                    b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
                 b_h2 += tl.dot(b_k, b_v)
         if K > 128:
             p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (128, i_t * BT), (64, BT), (0, 1))
             if USE_FP32_DOT:
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
                 if USE_K_RSTD:
-                    b_k = b_k * b_krstd[None, :]
+                    k_dtype = b_k.dtype
+                    b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
                 b_h3 += tl.dot(b_k, b_v)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_K_RSTD:
-                    b_k = b_k * b_krstd[None, :]
+                    k_dtype = b_k.dtype
+                    b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
                 b_h3 += tl.dot(b_k, b_v)
         if K > 192:
             p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (192, i_t * BT), (64, BT), (0, 1))
             if USE_FP32_DOT:
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
                 if USE_K_RSTD:
-                    b_k = b_k * b_krstd[None, :]
+                    k_dtype = b_k.dtype
+                    b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
                 b_h4 += tl.dot(b_k, b_v)
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_K_RSTD:
-                    b_k = b_k * b_krstd[None, :]
+                    k_dtype = b_k.dtype
+                    b_k = (b_k.to(tl.float32) * b_krstd[None, :]).to(k_dtype)
                 b_h4 += tl.dot(b_k, b_v)
 
     if STORE_FINAL_STATE:
@@ -431,7 +439,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         else:
             b_k = tl.load(p_k, boundary_check=(0, 1))
         if USE_K_RSTD:
-            b_k = b_k * b_krstd[:, None]
+            k_dtype = b_k.dtype
+            b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
         if USE_GK:
             o_k1 = tl.arange(0, 64)
             b_gk_last1 = tl.load(gk + last_idx * H*K + o_k1, mask=(o_k1 < K), other=0.)
@@ -447,7 +456,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_K_RSTD:
-                b_k = b_k * b_krstd[:, None]
+                k_dtype = b_k.dtype
+                b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
             if USE_GK:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(gk + last_idx * H*K + o_k2, mask=(o_k2 < K), other=0.)
@@ -463,7 +473,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_K_RSTD:
-                b_k = b_k * b_krstd[:, None]
+                k_dtype = b_k.dtype
+                b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
             if USE_GK:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(gk + last_idx * H*K + o_k3, mask=(o_k3 < K), other=0.)
@@ -479,7 +490,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_K_RSTD:
-                b_k = b_k * b_krstd[:, None]
+                k_dtype = b_k.dtype
+                b_k = (b_k.to(tl.float32) * b_krstd[:, None]).to(k_dtype)
             if USE_GK:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(gk + last_idx * H*K + o_k4, mask=(o_k4 < K), other=0.)
@@ -511,7 +523,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
         if USE_Q_RSTD:
-            b_q = b_q * b_qrstd[None, :]
+            q_dtype = b_q.dtype
+            b_q = (b_q.to(tl.float32) * b_qrstd[None, :]).to(q_dtype)
         if USE_G:
             b_dh1 *= bg_last_exp
             b_q = b_q * b_g_exp[None, :]
@@ -534,7 +547,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
             if USE_Q_RSTD:
-                b_q = b_q * b_qrstd[None, :]
+                q_dtype = b_q.dtype
+                b_q = (b_q.to(tl.float32) * b_qrstd[None, :]).to(q_dtype)
             if USE_G:
                 b_dh2 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
@@ -557,7 +571,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
             if USE_Q_RSTD:
-                b_q = b_q * b_qrstd[None, :]
+                q_dtype = b_q.dtype
+                b_q = (b_q.to(tl.float32) * b_qrstd[None, :]).to(q_dtype)
             if USE_G:
                 b_dh3 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
@@ -580,7 +595,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
             if USE_Q_RSTD:
-                b_q = b_q * b_qrstd[None, :]
+                q_dtype = b_q.dtype
+                b_q = (b_q.to(tl.float32) * b_qrstd[None, :]).to(q_dtype)
             if USE_G:
                 b_dh4 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
