@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp_clamped
 from fla.utils import (
     IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
@@ -132,7 +132,7 @@ def fused_chunk_fwd_kernel(
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
         if USE_G or USE_G_GAMMA:
-            b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.where(m_s & m_t, exp_clamped(b_g[:, None] - b_g[None, :]), 0)
             # [BT, BT]
             b_s *= b_gs
             # [BT, BV]
@@ -270,7 +270,7 @@ def fused_chunk_bwd_kernel(
 
             p_dg = dg + ((i_k * NV + i_v) * all + (bos + o_t)).to(tl.int64) * H + i_h
             # [BT, BT]
-            b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.where(m_s & m_t, exp_clamped(b_g[:, None] - b_g[None, :]), 0)
             b_ds = b_ds * b_gs
             # [BT, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -287,7 +287,7 @@ def fused_chunk_bwd_kernel(
             b_gn = exp(b_g_last)
 
             # [BT, BT]
-            b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.where(m_s & m_t, exp_clamped(b_g[:, None] - b_g[None, :]), 0)
             b_ds = b_ds * b_gs
             # [BT, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -350,7 +350,7 @@ def fused_chunk_bwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp(b_g[:, None] - b_g[None, :]), 0)) * scale
+            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp_clamped(b_g[:, None] - b_g[None, :]), 0)) * scale
 
             b_s = b_s * b_gs
             b_ds = b_ds * b_gs
@@ -374,7 +374,7 @@ def fused_chunk_bwd_kernel(
             b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp(b_g[:, None] - b_g[None, :]), 0)) * scale
+            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp_clamped(b_g[:, None] - b_g[None, :]), 0)) * scale
 
             b_s = b_s * b_gs
             b_ds = b_ds * b_gs

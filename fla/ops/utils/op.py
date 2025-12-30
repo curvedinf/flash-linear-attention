@@ -20,6 +20,12 @@ else:
     log2 = tl.log2
 
 
+def exp_clamped(x, max_log: float = 80.0):
+    x = tl.minimum(x, max_log)
+    x = tl.maximum(x, -max_log)
+    return exp(x)
+
+
 if not IS_GATHER_SUPPORTED:
     @triton.jit
     def gather(src, index, axis, _builder=None):

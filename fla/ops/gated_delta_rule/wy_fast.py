@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp_clamped
 from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem
 
 if IS_NVIDIA_BLACKWELL:
@@ -229,7 +229,7 @@ def prepare_wy_repr_bwd_kernel(
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
 
     if USE_G:
-        b_dA *= exp(b_g[:, None] - b_g[None, :])
+        b_dA *= exp_clamped(b_g[:, None] - b_g[None, :])
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     b_dA = tl.where(m_A, -b_dA, 0).to(k.dtype.element_ty)

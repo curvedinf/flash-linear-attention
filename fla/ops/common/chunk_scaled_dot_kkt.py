@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp_clamped
 from fla.utils import autotune_cache_kwargs
 
 
@@ -79,7 +79,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
-        b_A *= exp(b_g_diff)
+        b_A *= exp_clamped(b_g_diff)
     b_A *= b_b[:, None]
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)

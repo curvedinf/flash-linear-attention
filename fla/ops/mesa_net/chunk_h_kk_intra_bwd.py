@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp_clamped
 
 
 @triton.heuristics({
@@ -96,7 +96,11 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_v = tl.load(p_k, boundary_check=(0, 1))
     b_k = (b_v * b_beta[:, None]).to(b_v.dtype)
 
-    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where(
+        (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]),
+        exp_clamped(b_g[:, None] - b_g[None, :]),
+        0,
+    )
     b_s = tl.dot(b_q_star, tl.trans(b_k)) * b_m
     b_ds = tl.dot(b_dq, tl.trans(b_v))
     b_dv += tl.dot(tl.trans(b_s.to(b_dq.dtype)), b_dq)

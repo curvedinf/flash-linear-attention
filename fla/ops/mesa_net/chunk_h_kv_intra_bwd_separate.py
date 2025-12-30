@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp_clamped
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
@@ -106,7 +106,11 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dg_last += tl.sum(b_h * b_dh)
     b_dg_last *= exp(b_g_last)
 
-    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where(
+        (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]),
+        exp_clamped(b_g[:, None] - b_g[None, :]),
+        0,
+    )
     b_k = (b_k * b_beta[:, None]).to(b_k.dtype)
     b_s = tl.dot(b_q, tl.trans(b_k)) * b_m
     b_ds = tl.dot(b_do, tl.trans(b_v))
@@ -215,7 +219,11 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
     b_do = tl.load(p_do, boundary_check=(0, 1))
     b_h = tl.load(p_h, boundary_check=(0, 1))
 
-    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where(
+        (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]),
+        exp_clamped(b_g[:, None] - b_g[None, :]),
+        0,
+    )
     b_k = (b_k * b_beta[:, None]).to(b_k.dtype)
 
     b_ds = tl.dot(b_do, tl.trans(b_v)) * b_m
