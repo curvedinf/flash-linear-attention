@@ -8,6 +8,8 @@ import triton.language.extra.libdevice as tldevice
 
 from fla.utils import IS_GATHER_SUPPORTED
 
+_EXP_CLAMP_MAX_LOG = float(os.environ.get("FLA_EXP_CLAMP_MAX_LOG", "80.0"))
+
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     exp = tldevice.fast_expf
     exp2 = tldevice.exp2
@@ -20,7 +22,8 @@ else:
     log2 = tl.log2
 
 
-def exp_clamped(x, max_log: float = 80.0):
+@triton.jit
+def exp_clamped(x, max_log: tl.constexpr = _EXP_CLAMP_MAX_LOG):
     x = tl.minimum(x, max_log)
     x = tl.maximum(x, -max_log)
     return exp(x)

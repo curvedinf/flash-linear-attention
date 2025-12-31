@@ -1,5 +1,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
 import warnings
 
 import torch
@@ -11,6 +12,65 @@ from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+_NAN_TRACE = os.environ.get("FLA_NAN_TRACE", "").lower() in ("1", "true", "yes")
+_TRACE_STATS = os.environ.get("FLA_TRACE_STATS", "").lower() in ("1", "true", "yes")
+_TRACE_THRESHOLD = float(os.environ.get("FLA_TRACE_STATS_THRESHOLD", "0") or "0")
+
+
+def _sample_tensor(tensor: torch.Tensor, max_elems: int = 262_144) -> torch.Tensor:
+    flat = tensor.detach().flatten()
+    if flat.numel() <= max_elems:
+        return flat
+    stride = max(1, flat.numel() // max_elems)
+    return flat[::stride][:max_elems]
+
+
+def _format_stats(label: str, tensor: torch.Tensor) -> str:
+    with torch.no_grad():
+        nan_count = int(torch.isnan(tensor).sum().item())
+        inf_count = int(torch.isinf(tensor).sum().item())
+        finite_count = int(torch.isfinite(tensor).sum().item())
+        sample = _sample_tensor(tensor).float()
+        finite_sample = sample[torch.isfinite(sample)]
+        if finite_sample.numel() > 0:
+            min_val = float(finite_sample.min().item())
+            max_val = float(finite_sample.max().item())
+            mean_val = float(finite_sample.mean().item())
+            std_val = float(finite_sample.std(unbiased=False).item())
+            abs_max = float(finite_sample.abs().max().item())
+        else:
+            min_val = max_val = mean_val = std_val = abs_max = float("nan")
+        return (
+            f"{label}=numel:{tensor.numel()} sample:{sample.numel()} "
+            f"nan:{nan_count} inf:{inf_count} finite:{finite_count} "
+            f"min:{min_val:.3e} max:{max_val:.3e} mean:{mean_val:.3e} "
+            f"std:{std_val:.3e} abs_max:{abs_max:.3e}"
+        )
+
+
+def _check_finite(label: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None:
+        return
+    if not _NAN_TRACE:
+        return
+    if torch.isfinite(tensor).all().item():
+        return
+    print(f"[nan-trace] {label} non-finite")
+    print(
+        f"[nan-trace] {label} shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device}"
+    )
+    print(f"[nan-trace] {_format_stats(label, tensor)}")
+    raise RuntimeError(f"Non-finite tensor detected in {label}")
+
+
+def _log_abs_max(label: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not _TRACE_STATS:
+        return
+    with torch.no_grad():
+        max_abs = float(tensor.detach().float().abs().max().item())
+    if _TRACE_THRESHOLD <= 0 or max_abs >= _TRACE_THRESHOLD:
+        print(f"[nan-trace] {label} abs_max={max_abs:.3e}")
 
 
 def chunk_gated_delta_rule_fwd(
@@ -27,7 +87,14 @@ def chunk_gated_delta_rule_fwd(
     k_rstd: torch.Tensor | None = None,
     l2_norm_eps: float = 1e-6,
 ):
+    _check_finite("gated_delta_rule.q", q)
+    _check_finite("gated_delta_rule.k", k)
+    _check_finite("gated_delta_rule.v", v)
+    _check_finite("gated_delta_rule.g_in", g)
+    _check_finite("gated_delta_rule.beta", beta)
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    _check_finite("gated_delta_rule.g_cumsum", g)
+    _log_abs_max("gated_delta_rule.g_cumsum", g)
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
@@ -38,11 +105,13 @@ def chunk_gated_delta_rule_fwd(
         k_rstd=k_rstd,
         l2_norm_eps=l2_norm_eps,
     )
+    _check_finite("gated_delta_rule.A_kkt", A)
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
         output_dtype=k.dtype,
     )
+    _check_finite("gated_delta_rule.A_solve", A)
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -52,6 +121,8 @@ def chunk_gated_delta_rule_fwd(
         k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.w", w)
+    _check_finite("gated_delta_rule.u", u)
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
@@ -62,6 +133,9 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.h", h)
+    _check_finite("gated_delta_rule.v_new", v_new)
+    _check_finite("gated_delta_rule.final_state", final_state)
     o = chunk_fwd_o(
         q=q,
         k=k,
@@ -74,6 +148,8 @@ def chunk_gated_delta_rule_fwd(
         l2_norm_eps=l2_norm_eps,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.o", o)
+    _log_abs_max("gated_delta_rule.o", o)
     return g, o, A, final_state
 
 
@@ -92,6 +168,16 @@ def chunk_gated_delta_rule_bwd(
     q_rstd: torch.Tensor | None = None,
     k_rstd: torch.Tensor | None = None,
 ):
+    _check_finite("gated_delta_rule.bwd.q", q)
+    _check_finite("gated_delta_rule.bwd.k", k)
+    _check_finite("gated_delta_rule.bwd.v", v)
+    _check_finite("gated_delta_rule.bwd.g", g)
+    _check_finite("gated_delta_rule.bwd.beta", beta)
+    _check_finite("gated_delta_rule.bwd.A", A)
+    _check_finite("gated_delta_rule.bwd.do", do)
+    _log_abs_max("gated_delta_rule.bwd.do", do)
+    _check_finite("gated_delta_rule.bwd.dht", dht)
+    _log_abs_max("gated_delta_rule.bwd.dht", dht)
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -101,6 +187,8 @@ def chunk_gated_delta_rule_bwd(
         k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.bwd.w", w)
+    _check_finite("gated_delta_rule.bwd.u", u)
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
@@ -111,6 +199,8 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.bwd.h", h)
+    _check_finite("gated_delta_rule.bwd.v_new", v_new)
     dv = chunk_bwd_dv_local(
         q=q,
         k=k,
@@ -121,6 +211,8 @@ def chunk_gated_delta_rule_bwd(
         k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.bwd.dv_local", dv)
+    _log_abs_max("gated_delta_rule.bwd.dv_local", dv)
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
         k=k,
@@ -135,6 +227,12 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.bwd.dh", dh)
+    _log_abs_max("gated_delta_rule.bwd.dh", dh)
+    _check_finite("gated_delta_rule.bwd.dh0", dh0)
+    _log_abs_max("gated_delta_rule.bwd.dh0", dh0)
+    _check_finite("gated_delta_rule.bwd.dv", dv)
+    _log_abs_max("gated_delta_rule.bwd.dv", dv)
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
         k=k,
@@ -150,6 +248,14 @@ def chunk_gated_delta_rule_bwd(
         k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.bwd.dq", dq)
+    _log_abs_max("gated_delta_rule.bwd.dq", dq)
+    _check_finite("gated_delta_rule.bwd.dk", dk)
+    _log_abs_max("gated_delta_rule.bwd.dk", dk)
+    _check_finite("gated_delta_rule.bwd.dw", dw)
+    _log_abs_max("gated_delta_rule.bwd.dw", dw)
+    _check_finite("gated_delta_rule.bwd.dg", dg)
+    _log_abs_max("gated_delta_rule.bwd.dg", dg)
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
         v=v,
@@ -161,9 +267,19 @@ def chunk_gated_delta_rule_bwd(
         k_rstd=k_rstd,
         cu_seqlens=cu_seqlens,
     )
+    _check_finite("gated_delta_rule.bwd.dk2", dk2)
+    _log_abs_max("gated_delta_rule.bwd.dk2", dk2)
+    _check_finite("gated_delta_rule.bwd.dv2", dv)
+    _log_abs_max("gated_delta_rule.bwd.dv2", dv)
+    _check_finite("gated_delta_rule.bwd.db", db)
+    _log_abs_max("gated_delta_rule.bwd.db", db)
+    _check_finite("gated_delta_rule.bwd.dg2", dg2)
+    _log_abs_max("gated_delta_rule.bwd.dg2", dg2)
     dk.add_(dk2)
     dg.add_(dg2)
     dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens)
+    _check_finite("gated_delta_rule.bwd.dg_cumsum", dg)
+    _log_abs_max("gated_delta_rule.bwd.dg_cumsum", dg)
     return dq, dk, dv, db, dg, dh0
 
 
@@ -205,6 +321,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             k_rstd=k_rstd,
             l2_norm_eps=l2_norm_eps,
         )
+        _check_finite("gated_delta_rule.autograd.g", g)
+        _check_finite("gated_delta_rule.autograd.o", o)
+        _check_finite("gated_delta_rule.autograd.A", A)
+        _check_finite("gated_delta_rule.autograd.final_state", final_state)
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -219,6 +339,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         dht: torch.Tensor,
     ):
         q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
+        _check_finite("gated_delta_rule.autograd.do", do)
+        _check_finite("gated_delta_rule.autograd.dht", dht)
         dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
             q=q,
             k=k,
@@ -234,6 +356,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             q_rstd=q_rstd,
             k_rstd=k_rstd,
         )
+        _check_finite("gated_delta_rule.autograd.dq", dq)
+        _check_finite("gated_delta_rule.autograd.dk", dk)
+        _check_finite("gated_delta_rule.autograd.dv", dv)
+        _check_finite("gated_delta_rule.autograd.db", db)
+        _check_finite("gated_delta_rule.autograd.dg", dg)
+        _check_finite("gated_delta_rule.autograd.dh0", dh0)
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd_from_x(q, q_rstd, dq)
             dk = l2norm_bwd_from_x(k, k_rstd, dk)
@@ -254,6 +382,9 @@ def chunk_gated_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
     **kwargs,
 ):
+    g_scale = float(os.environ.get("FLA_G_SCALE", "1.0") or "1.0")
+    if g_scale != 1.0:
+        g = g * g_scale
     r"""
     Args:
         q (torch.Tensor):

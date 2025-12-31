@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,52 @@ import triton
 import triton.language as tl
 
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
+
+_NAN_TRACE = os.environ.get("FLA_NAN_TRACE", "").lower() in ("1", "true", "yes")
+
+
+def _sample_tensor(tensor: torch.Tensor, max_elems: int = 262_144) -> torch.Tensor:
+    flat = tensor.detach().flatten()
+    if flat.numel() <= max_elems:
+        return flat
+    stride = max(1, flat.numel() // max_elems)
+    return flat[::stride][:max_elems]
+
+
+def _format_stats(label: str, tensor: torch.Tensor) -> str:
+    with torch.no_grad():
+        nan_count = int(torch.isnan(tensor).sum().item())
+        inf_count = int(torch.isinf(tensor).sum().item())
+        finite_count = int(torch.isfinite(tensor).sum().item())
+        sample = _sample_tensor(tensor).float()
+        finite_sample = sample[torch.isfinite(sample)]
+        if finite_sample.numel() > 0:
+            min_val = float(finite_sample.min().item())
+            max_val = float(finite_sample.max().item())
+            mean_val = float(finite_sample.mean().item())
+            std_val = float(finite_sample.std(unbiased=False).item())
+            abs_max = float(finite_sample.abs().max().item())
+        else:
+            min_val = max_val = mean_val = std_val = abs_max = float("nan")
+        return (
+            f"{label}=numel:{tensor.numel()} sample:{sample.numel()} "
+            f"nan:{nan_count} inf:{inf_count} finite:{finite_count} "
+            f"min:{min_val:.3e} max:{max_val:.3e} mean:{mean_val:.3e} "
+            f"std:{std_val:.3e} abs_max:{abs_max:.3e}"
+        )
+
+
+def _check_finite(label: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not _NAN_TRACE:
+        return
+    if torch.isfinite(tensor).all().item():
+        return
+    print(f"[nan-trace] {label} non-finite")
+    print(
+        f"[nan-trace] {label} shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device}"
+    )
+    print(f"[nan-trace] {_format_stats(label, tensor)}")
+    raise RuntimeError(f"Non-finite tensor detected in {label}")
 
 
 @triton.heuristics({
@@ -630,6 +677,10 @@ class LayerNormGatedFunction(torch.autograd.Function):
         residual_in_fp32: bool = False,
         is_rms_norm: bool = False,
     ):
+        _check_finite("fused_norm_gate.x", x)
+        _check_finite("fused_norm_gate.g", g)
+        if residual is not None:
+            _check_finite("fused_norm_gate.residual", residual)
         x_shape_og = x.shape
         g_shape_og = g.shape
         # reshape input data into 2D tensor
@@ -654,6 +705,7 @@ class LayerNormGatedFunction(torch.autograd.Function):
             residual_dtype=residual_dtype,
             is_rms_norm=is_rms_norm,
         )
+        _check_finite("fused_norm_gate.y", y)
         ctx.save_for_backward(residual_out, g, weight, bias, mean, rstd)
         ctx.x_shape_og = x_shape_og
         ctx.g_shape_og = g_shape_og
@@ -671,10 +723,12 @@ class LayerNormGatedFunction(torch.autograd.Function):
     def backward(ctx, dy, *args):
         x, g, weight, bias, mean, rstd = ctx.saved_tensors
         dy = dy.reshape(-1, dy.shape[-1])
+        _check_finite("fused_norm_gate.dy", dy)
         assert dy.shape == x.shape
         if ctx.prenorm:
             dresidual = args[0]
             dresidual = dresidual.reshape(-1, dresidual.shape[-1])
+            _check_finite("fused_norm_gate.dresidual", dresidual)
             assert dresidual.shape == x.shape
         else:
             dresidual = None
@@ -693,6 +747,11 @@ class LayerNormGatedFunction(torch.autograd.Function):
             is_rms_norm=ctx.is_rms_norm,
             x_dtype=ctx.x_dtype,
         )
+        _check_finite("fused_norm_gate.dx", dx)
+        _check_finite("fused_norm_gate.dg", dg)
+        _check_finite("fused_norm_gate.dw", dw)
+        _check_finite("fused_norm_gate.db", db)
+        _check_finite("fused_norm_gate.dres_in", dres_in)
         return (
             dx.reshape(ctx.x_shape_og),
             dg.reshape(ctx.g_shape_og),
