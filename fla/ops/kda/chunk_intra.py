@@ -495,24 +495,27 @@ def chunk_kda_bwd_kernel_intra(
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(i_i + 1, NC):
-            p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
-            p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k*BK), (BC, BK), (1, 0))
-            p_b = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT + i_j * BC,), (BC,), (0,))
+            o_j = i_t * BT + i_j * BC + o_i
+            m_j = o_j < T
+            mask_qk = m_j[:, None] & m_k[None, :]
+
+            p_q = q + o_j[:, None] * (H * K) + o_k[None, :]
+            p_k = k + o_j[:, None] * (H * K) + o_k[None, :]
+            p_gk = g + o_j[:, None] * (H * K) + o_k[None, :]
+            p_b = beta + o_j * H
+
             p_dAqk = tl.make_block_ptr(dAqk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
             p_dAkk = tl.make_block_ptr(dAkk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
             # [BC]
-            b_b = tl.load(p_b, boundary_check=(0,))
+            b_b = tl.load(p_b, mask=m_j, other=0)
             # [BC, BK]
-            b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_kb = tl.load(p_k, boundary_check=(0, 1)) * b_b[:, None]
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
+            b_q = tl.load(p_q, mask=mask_qk, other=0)
+            b_kb = tl.load(p_k, mask=mask_qk, other=0) * b_b[:, None]
+            b_gk = tl.load(p_gk, mask=mask_qk, other=0)
             # [BC, BC]
             b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
             b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
 
-            o_j = i_t * BT + i_j * BC + o_i
-            m_j = o_j < T
             # [BC, BK]
             b_gkn = tl.where(m_j[:, None], exp2(b_gk - b_gn[None, :]), 0)
             b_qg = b_q * b_gkn
