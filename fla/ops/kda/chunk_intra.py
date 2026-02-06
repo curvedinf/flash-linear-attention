@@ -493,35 +493,36 @@ def chunk_kda_bwd_kernel_intra(
     if i_i < NC - 1:
         p_gn = g + (min(i_ti + BC, T) - 1) * H*K + o_k
         # [BK,]
-        b_gn = tl.load(p_gn, mask=m_k, other=0)
+        b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
+        row_offsets = i_i * BC + o_i
+        row_mask = row_offsets < BT
         for i_j in range(i_i + 1, NC):
-            o_j = i_t * BT + i_j * BC + o_i
-            m_j = o_j < T
-            mask_qk = m_j[:, None] & m_k[None, :]
+            for r in range(0, BC):
+                o_jr = i_t * BT + i_j * BC + r
+                m_jr = o_jr < T
+                mask_k = m_k & m_jr
 
-            p_q = q + o_j[:, None] * (H * K) + o_k[None, :]
-            p_k = k + o_j[:, None] * (H * K) + o_k[None, :]
-            p_gk = g + o_j[:, None] * (H * K) + o_k[None, :]
-            p_b = beta + o_j * H
+                p_qr = q + o_jr * (H * K) + o_k
+                p_kr = k + o_jr * (H * K) + o_k
+                p_gr = g + o_jr * (H * K) + o_k
+                p_br = beta + o_jr * H
 
-            p_dAqk = tl.make_block_ptr(dAqk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
-            p_dAkk = tl.make_block_ptr(dAkk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
-            # [BC]
-            b_b = tl.load(p_b, mask=m_j, other=0)
-            # [BC, BK]
-            b_q = tl.load(p_q, mask=mask_qk, other=0)
-            b_kb = tl.load(p_k, mask=mask_qk, other=0) * b_b[:, None]
-            b_gk = tl.load(p_gk, mask=mask_qk, other=0)
-            # [BC, BC]
-            b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
-            b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
+                b_qr = tl.load(p_qr, mask=mask_k, other=0).to(tl.float32)
+                b_kr = tl.load(p_kr, mask=mask_k, other=0).to(tl.float32)
+                b_gr = tl.load(p_gr, mask=mask_k, other=0).to(tl.float32)
+                b_br = tl.load(p_br, mask=m_jr, other=0).to(tl.float32)
 
-            # [BC, BK]
-            b_gkn = tl.where(m_j[:, None], exp2(b_gk - b_gn[None, :]), 0)
-            b_qg = b_q * b_gkn
-            b_kbg = b_kb * b_gkn
-            # [BC, BK]
-            b_dkt += tl.dot(b_dAqk, b_qg) + tl.dot(b_dAkk, b_kbg)
+                b_gkn = tl.where(m_k, exp2(b_gr - b_gn), 0)
+                b_qg = b_qr * b_gkn
+                b_kbg = (b_kr * b_br) * b_gkn
+
+                p_dAqk_col = dAqk + (o_jr * (H * BT)) + row_offsets
+                p_dAkk_col = dAkk + (o_jr * (H * BT)) + row_offsets
+                col_mask = row_mask & m_jr
+                b_dAqk_col = tl.load(p_dAqk_col, mask=col_mask, other=0).to(tl.float32)
+                b_dAkk_col = tl.load(p_dAkk_col, mask=col_mask, other=0).to(tl.float32)
+
+                b_dkt += b_dAqk_col[:, None] * b_qg[None, :] + b_dAkk_col[:, None] * b_kbg[None, :]
         b_dkt *= exp2(b_gn[None, :] - b_g)
     o_dA = i_ti * H*BT + i_i * BC + o_i
     p_qj = q + i_ti * H*K + o_k
